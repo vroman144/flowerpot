@@ -1,4 +1,4 @@
-/* 
+/*
  * Project operationHousePlant
  * Author: Victor Roman
  * Date: 03.19.25
@@ -11,8 +11,41 @@
 #include <Adafruit_MQTT.h>
 #include "Adafruit_MQTT/Adafruit_MQTT_SPARK.h"
 #include "Adafruit_MQTT/Adafruit_MQTT.h"
+#include "Adafruit_BME280.h"
+#include "Adafruit_SSD1306.h"
+#include "Air_Quality_Sensor.h"
 #include "credentials.h"
 
+#define XPOS 0
+#define YPOS 1
+
+String dateTime, timeOnly;
+Adafruit_BME280 bme;
+const int PUMP = D16;
+const int AQSENOR = D12;
+const int MS = A2;
+const int OLED_RESET = -1;
+const int HEXADDRESS = 0x76;
+const int HEXADDRESS = 0x3c;
+unsigned int currentTime;
+unsigned int lastSecond, lastTime;
+int buttonPress;
+int brightness;
+int moisture;
+int inputValue;
+int status;
+float subValue, pubValue;
+float tempC, tempF;
+float pressPA;
+float humidRH;
+float pressureHg;
+
+Adafruit_SSD1306 display(OLED_RESET);
+SerialLogHandler logHandler(LOG_LEVEL_INFO);
+
+/************Declare Functions*************/
+void MQTT_connect();
+bool MQTT_ping();
 
 /************ Global State (you don't need to change this!) ***   ***************/
 TCPClient TheClient;
@@ -23,13 +56,11 @@ Adafruit_MQTT_SPARK mqtt(&TheClient, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, A
 /****************************** Feeds ***************************************/
 // Setup Feeds to publish or subscribe
 // Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname>
-Adafruit_MQTT_Subscribe subFeed = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/feed1");
 Adafruit_MQTT_Subscribe subButtonPress = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/Button Press");
-Adafruit_MQTT_Subscribe subBrightness = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/brightness");
-Adafruit_MQTT_Publish pubFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/feed2");
-Adafruit_MQTT_Publish pubRanNumber = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/randNumber");
-
-
+Adafruit_MQTT_Publish pubHumidity = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/Humidity");
+Adafruit_MQTT_Publish pubSoilMoisture = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/Soil Moisture");
+Adafruit_MQTT_Publish pubTemp = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/Temp");
+Adafruit_MQTT_Publish pubAirQuality = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/Air Quality");
 
 // Let Device OS manage the connection to the Particle Cloud
 SYSTEM_MODE(AUTOMATIC);
@@ -42,16 +73,174 @@ SYSTEM_THREAD(ENABLED);
 SerialLogHandler logHandler(LOG_LEVEL_INFO);
 
 // setup() runs once, when the device is first turned on
-void setup() {
-  // Put initialization like pinMode and begin functions here
+void setup()
+{
+  Serial.begin(9600);
+  waitFor(Serial.isConnected, 10000);
+
+  // Connect to Internet but not Particle Cloud
+  WiFi.on();
+  WiFi.connect();
+  while (WiFi.connecting())
+  {
+    Serial.printf(".");
+  }
+  Serial.printf("\n\n");
+
+  // Setup MQTT subscription
+  mqtt.subscribe(&subButtonPress);
+
+  // AQSENSOR
+  // if (AQSENOR.init())
+  {
+    Serial.println("AQSensor ready.");
+  }
+  // else
+  {
+    Serial.println("AQSensor ERROR!");
+  }
+
+  // OLED
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  // BME
+  status = bme.begin(0x76);
+  if (status == false)
+  {
+    Serial.printf("BME280 at address 0x%02X failed to start", 0x76);
+  }
+
+  // OLED
+  display.display();
+  delay(2000);
+  display.clearDisplay();
+
+  // PINMODE
+  pinMode(MS, INPUT);
+  pinMode(PUMP, OUTPUT);
+
+  // TIME SET UP
+  Time.zone(-7);
+  Particle.syncTime();
 }
 
 // loop() runs over and over again, as quickly as it can execute.
-void loop() {
-  // The core of your code will likely live here.
+void loop()
+{
+  MQTT_connect();
+  MQTT_ping();
 
-  // Example: Publish event to cloud every 10 seconds. Uncomment the next 3 lines to try it!
-  // Log.info("Sending Hello World to the cloud!");
-  // Particle.publish("Hello world!");
-  // delay( 10 * 1000 ); // milliseconds and blocking - see docs for more info!
+  currentTime = millis();
+  inputValue = analogRead(MS);
+  Serial.printf("Moisure lvl: %f\n", inputValue);
+
+  // this is our 'wait for incoming subscription packets' busy subloop
+  Adafruit_MQTT_Subscribe *subscription;
+  while ((subscription = mqtt.readSubscription(100)))
+  {
+    // AQSENSOR LOOP
+    // int quality = AQsensor.slope();
+
+    Serial.print("AQSensor value: ");
+    // Serial.println(AQsensor.getValue());
+
+    // if (quality == AQsensor) {
+    //      Serial.printf("High pollution! Force signal active.");
+    //  } else if (quality == AirQualitySensor::HIGH_POLLUTION) {
+    //      Serial.println("High pollution!");
+    //  } else if (quality == AirQualitySensor::LOW_POLLUTION) {
+    //      Serial.println("Low pollution!");
+    //  } else if (quality == AirQualitySensor::FRESH_AIR) {
+    //      Serial.println("Fresh air.");
+    //  }
+
+    delay(1000);
+
+    // TIME LOOP
+    dateTime = Time.timeStr();
+    timeOnly = dateTime.substring(11, 19);
+
+    // MOISTURE SENSOR & PUMP
+    digitalRead(MS);
+    // if (MS <= 2500) {
+    digitalWrite(PUMP, HIGH);
+  }
+
+  // BME INPUT READINGS
+  humidRH = bme.readHumidity();
+  tempC = bme.readTemperature();
+  pressPA = bme.readPressure();
+  tempF = tempC * (9.0 / 5.0) + 32.0;
+  pressureHg = pressPA / 3386.39;
+
+  // BME PRINT TO MONITOR
+  if ((currentTime - lastSecond) > 500)
+  {
+    lastSecond = millis();
+    Serial.printf("Humidity =%f\n", humidRH);
+    Serial.printf("TempF: %f F\n", tempF);
+    Serial.printf("\nMoisture lvl: %i", inputValue);
+  }
+
+  // BME && MS READINGS PRINT TO OLED
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.printf(timeOnly);
+  display.printf("T:%f\n H:%f\n MS:%i\n", tempF, humidRH, inputValue);
+  // display.setTextColor(BLACK, WHITE);
+  display.display();
+
+  // PRINTING READING TO DASHBOARD
+  if ((millis() - lastTime > 6000))
+  {
+    if (mqtt.Update())
+    {
+      pubHumidity.publish(humidRH);
+      pubSoilMoisture.publish(inputValue);
+      pubTemp.publish(tempC);
+      // pubAirQuality.publish(AirQuality);
+    }
+    lastTime = millis();
+  }
+}
+
+void MQTT_connect()
+{
+  int8_t ret;
+
+  // Return if already connected.
+  if (mqtt.connected())
+  {
+    return;
+  }
+
+  Serial.print("Connecting to MQTT... ");
+
+  while ((ret = mqtt.connect()) != 0)
+  { // connect will return 0 for connected
+    Serial.printf("Error Code %s\n", mqtt.connectErrorString(ret));
+    Serial.printf("Retrying MQTT connection in 5 seconds...\n");
+    mqtt.disconnect();
+    delay(5000); // wait 5 seconds and try again
+  }
+  Serial.printf("MQTT Connected!\n");
+}
+
+bool MQTT_ping()
+{
+  static unsigned int last;
+  bool pingStatus;
+
+  if ((millis() - last) > 120000)
+  {
+    Serial.printf("Pinging MQTT \n");
+    pingStatus = mqtt.ping();
+    if (!pingStatus)
+    {
+      Serial.printf("Disconnecting \n");
+      mqtt.disconnect();
+    }
+    last = millis();
+  }
+  return pingStatus;
 }
